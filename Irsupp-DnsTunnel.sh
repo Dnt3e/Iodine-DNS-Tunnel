@@ -44,90 +44,28 @@ echo -e "${CYAN}Location${RESET}: ${YELLOW}$LOCATION${RESET}"
 echo -e "${CYAN}Datacenter${RESET}: ${YELLOW}$DATACENTER${RESET}"
 echo -e "$LINE"
 
-port_forwarding_setup() {
+configure_port_forwarding() {
+    ROLE=$1
     echo -e "$LINE"
     echo -e "${GREEN}Port Forwarding Configuration${RESET}"
     echo -e "$LINE"
     
-    PS3='Select port input method: '
-    options=("Single Port" "Port Range" "Comma-separated List" "Quit")
-    select opt in "${options[@]}"
-    do
-        case $opt in
-            "Single Port")
-                read -p "Enter port number: " PORT
-                PORTS=$PORT
-                break
-                ;;
-            "Port Range")
-                read -p "Enter start port: " START
-                read -p "Enter end port: " END
-                PORTS="$START-$END"
-                break
-                ;;
-            "Comma-separated List")
-                read -p "Enter ports (comma separated): " PORT_LIST
-                PORTS=$(echo $PORT_LIST | tr ',' ' ')
-                break
-                ;;
-            "Quit")
-                return
-                ;;
-            *) echo "Invalid option";;
-        esac
-    done
+    if [ "$ROLE" == "server" ]; then
+        read -p "Enter ports to forward to Iran (e.g. 80,443 or 1000-2000): " PORTS
+        for port in $(echo $PORTS | tr ',' ' '); do
+            iptables -t nat -A PREROUTING -p tcp --dport $port -j DNAT --to-destination 10.0.0.2
+            iptables -t nat -A PREROUTING -p udp --dport $port -j DNAT --to-destination 10.0.0.2
+        done
+    else
+        read -p "Enter ports to forward to Foreign (e.g. 22,3389 or 1000-2000): " PORTS
+        for port in $(echo $PORTS | tr ',' ' '); do
+            iptables -t nat -A PREROUTING -p tcp --dport $port -j DNAT --to-destination 10.0.0.1
+            iptables -t nat -A PREROUTING -p udp --dport $port -j DNAT --to-destination 10.0.0.1
+        done
+    fi
     
-    echo -e "$LINE"
-    PS3='Select forwarding direction: '
-    directions=("Iran to Foreign" "Foreign to Iran" "Both" "Quit")
-    select direction in "${directions[@]}"
-    do
-        case $direction in
-            "Iran to Foreign")
-                DIRECTION="IRAN_TO_FOREIGN"
-                break
-                ;;
-            "Foreign to Iran")
-                DIRECTION="FOREIGN_TO_IRAN"
-                break
-                ;;
-            "Both")
-                DIRECTION="BOTH"
-                break
-                ;;
-            "Quit")
-                return
-                ;;
-            *) echo "Invalid option";;
-        esac
-    done
-    
-    echo -e "$LINE"
-    echo -e "${YELLOW}Creating iptables rules...${RESET}"
-    
-    case $DIRECTION in
-        "IRAN_TO_FOREIGN"|"BOTH")
-            for port in $PORTS; do
-                iptables -t nat -A PREROUTING -p tcp --dport $port -j DNAT --to-destination 10.0.0.1
-                iptables -t nat -A PREROUTING -p udp --dport $port -j DNAT --to-destination 10.0.0.1
-                echo -e "${GREEN}Forwarding port $port to Foreign server${RESET}"
-            done
-            ;;
-    esac
-    
-    case $DIRECTION in
-        "FOREIGN_TO_IRAN"|"BOTH")
-            for port in $PORTS; do
-                iptables -t nat -A PREROUTING -p tcp --dport $port -j DNAT --to-destination 10.0.0.2
-                iptables -t nat -A PREROUTING -p udp --dport $port -j DNAT --to-destination 10.0.0.2
-                echo -e "${GREEN}Forwarding port $port to Iran server${RESET}"
-            done
-            ;;
-    esac
-    
-    echo -e "$LINE"
-    echo -e "${GREEN}Port forwarding configured successfully!${RESET}"
-    echo -e "$LINE"
+    sysctl -w net.ipv4.ip_forward=1
+    echo -e "${GREEN}Port forwarding configured for: $PORTS${RESET}"
 }
 
 echo -e "${GREEN}1. Install${RESET}"
@@ -149,17 +87,9 @@ case "$OPTION" in
 
         if [ "$ROLE" == "server" ]; then
             read -p "Server Tunnel IP: " TUNNEL_IP
-        elif [ "$ROLE" == "client" ]; then
-            echo -e "${GREEN}Client side detected. IP not required.${RESET}"
-        else
-            echo -e "${RED}Invalid side selected.${RESET}"
-            exit 1
         fi
 
-        echo -e "${GREEN}Installing iodine...${RESET}"
         apt update && apt install iodine -y
-
-        echo -e "${GREEN}Building service...${RESET}"
 
         if [ "$ROLE" == "server" ]; then
             cat > "$SERVICE_FILE" <<EOF
@@ -194,12 +124,13 @@ WantedBy=multi-user.target
 EOF
         fi
 
-        echo -e "${GREEN}Enabling and starting service...${RESET}"
+        configure_port_forwarding "$ROLE"
+        
         systemctl daemon-reload
         systemctl enable $(basename "$SERVICE_FILE")
         systemctl restart $(basename "$SERVICE_FILE")
 
-        echo -e "${GREEN}Installation complete.${RESET}"
+        echo -e "${GREEN}Installation complete with port forwarding!${RESET}"
         systemctl status $(basename "$SERVICE_FILE") --no-pager
         ;;
     2)
@@ -244,7 +175,8 @@ EOF
         fi
         ;;
     6)
-        port_forwarding_setup
+        read -p "Select Side (server/client): " ROLE
+        configure_port_forwarding "$ROLE"
         ;;
     7)
         echo "Closing script."
