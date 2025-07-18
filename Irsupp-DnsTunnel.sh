@@ -44,90 +44,93 @@ echo -e "${CYAN}Location${RESET}: ${YELLOW}$LOCATION${RESET}"
 echo -e "${CYAN}Datacenter${RESET}: ${YELLOW}$DATACENTER${RESET}"
 echo -e "$LINE"
 
-port_forwarding_setup() {
-    echo -e "$LINE"
-    echo -e "${GREEN}Port Forwarding Configuration${RESET}"
-    echo -e "$LINE"
+detect_ips() {
+    MAIN_IP=$(ip route get 1 | awk '{print $7}' | head -1)
+    [ -z "$MAIN_IP" ] && MAIN_IP="127.0.0.1"
     
-    PS3='Select port input method: '
-    options=("Single Port" "Port Range" "Comma-separated List" "Quit")
-    select opt in "${options[@]}"
-    do
-        case $opt in
-            "Single Port")
-                read -p "Enter port number: " PORT
-                PORTS=$PORT
-                break
-                ;;
-            "Port Range")
-                read -p "Enter start port: " START
-                read -p "Enter end port: " END
-                PORTS="$START-$END"
-                break
-                ;;
-            "Comma-separated List")
-                read -p "Enter ports (comma separated): " PORT_LIST
-                PORTS=$(echo $PORT_LIST | tr ',' ' ')
-                break
-                ;;
-            "Quit")
-                return
-                ;;
-            *) echo "Invalid option";;
-        esac
-    done
+    TUNNEL_IP=$(ip -o addr show | awk '/inet (10|172|192\.168)\.[0-9]+\.[0-9]+/ {print $4}' | cut -d'/' -f1 | head -1)
+    [ -z "$TUNNEL_IP" ] && TUNNEL_IP=$MAIN_IP
     
-    echo -e "$LINE"
-    PS3='Select forwarding direction: '
-    directions=("Iran to Foreign" "Foreign to Iran" "Both" "Quit")
-    select direction in "${directions[@]}"
-    do
-        case $direction in
-            "Iran to Foreign")
-                DIRECTION="IRAN_TO_FOREIGN"
-                break
-                ;;
-            "Foreign to Iran")
-                DIRECTION="FOREIGN_TO_IRAN"
-                break
-                ;;
-            "Both")
-                DIRECTION="BOTH"
-                break
-                ;;
-            "Quit")
-                return
-                ;;
-            *) echo "Invalid option";;
-        esac
-    done
+    echo "$MAIN_IP,$TUNNEL_IP"
+}
+
+setup_nftables() {
+    IFS=',' read -r MAIN_IP TUNNEL_IP <<< "$(detect_ips)"
     
-    echo -e "$LINE"
-    echo -e "${YELLOW}Creating iptables rules...${RESET}"
+    echo -e "${GREEN}Main Server IP: ${YELLOW}$MAIN_IP${RESET}"
+    echo -e "${GREEN}Tunnel IP: ${YELLOW}$TUNNEL_IP${RESET}"
     
-    case $DIRECTION in
-        "IRAN_TO_FOREIGN"|"BOTH")
-            for port in $PORTS; do
-                iptables -t nat -A PREROUTING -p tcp --dport $port -j DNAT --to-destination 10.0.0.1
-                iptables -t nat -A PREROUTING -p udp --dport $port -j DNAT --to-destination 10.0.0.1
-                echo -e "${GREEN}Forwarding port $port to Foreign server${RESET}"
-            done
-            ;;
-    esac
+    read -p "Enter local IP for NAT loop (default $MAIN_IP): " LOCAL_IP
+    LOCAL_IP=${LOCAL_IP:-$MAIN_IP}
     
-    case $DIRECTION in
-        "FOREIGN_TO_IRAN"|"BOTH")
-            for port in $PORTS; do
-                iptables -t nat -A PREROUTING -p tcp --dport $port -j DNAT --to-destination 10.0.0.2
-                iptables -t nat -A PREROUTING -p udp --dport $port -j DNAT --to-destination 10.0.0.2
-                echo -e "${GREEN}Forwarding port $port to Iran server${RESET}"
-            done
-            ;;
-    esac
+    read -p "Enter ports (single: 80, range: 1000-2000, list: 80,443,53): " PORTS
     
-    echo -e "$LINE"
-    echo -e "${GREEN}Port forwarding configured successfully!${RESET}"
-    echo -e "$LINE"
+    NFT_RULES=$(mktemp)
+    cat > "$NFT_RULES" <<EOF
+table ip nat {
+    chain prerouting {
+        type nat hook prerouting priority 0;
+EOF
+    
+    if [[ $PORTS == *","* ]]; then
+        IFS=',' read -ra PORT_ARRAY <<< "$PORTS"
+        for port in "${PORT_ARRAY[@]}"; do
+            cat >> "$NFT_RULES" <<EOF
+        tcp dport $port dnat to $TUNNEL_IP
+        udp dport $port dnat to $TUNNEL_IP
+EOF
+        done
+    elif [[ $PORTS == *"-"* ]]; then
+        START_PORT=$(echo "$PORTS" | cut -d'-' -f1)
+        END_PORT=$(echo "$PORTS" | cut -d'-' -f2)
+        cat >> "$NFT_RULES" <<EOF
+        tcp dport $START_PORT-$END_PORT dnat to $TUNNEL_IP
+        udp dport $START_PORT-$END_PORT dnat to $TUNNEL_IP
+EOF
+    else
+        cat >> "$NFT_RULES" <<EOF
+        tcp dport $PORTS dnat to $TUNNEL_IP
+        udp dport $PORTS dnat to $TUNNEL_IP
+EOF
+    fi
+    
+    cat >> "$NFT_RULES" <<EOF
+    }
+    
+    chain output {
+        type nat hook output priority 0;
+EOF
+    
+    if [[ $PORTS == *","* ]]; then
+        IFS=',' read -ra PORT_ARRAY <<< "$PORTS"
+        for port in "${PORT_ARRAY[@]}"; do
+            cat >> "$NFT_RULES" <<EOF
+        tcp dport $port ip daddr $LOCAL_IP dnat to $TUNNEL_IP
+        udp dport $port ip daddr $LOCAL_IP dnat to $TUNNEL_IP
+EOF
+        done
+    elif [[ $PORTS == *"-"* ]]; then
+        START_PORT=$(echo "$PORTS" | cut -d'-' -f1)
+        END_PORT=$(echo "$PORTS" | cut -d'-' -f2)
+        cat >> "$NFT_RULES" <<EOF
+        tcp dport $START_PORT-$END_PORT ip daddr $LOCAL_IP dnat to $TUNNEL_IP
+        udp dport $START_PORT-$END_PORT ip daddr $LOCAL_IP dnat to $TUNNEL_IP
+EOF
+    else
+        cat >> "$NFT_RULES" <<EOF
+        tcp dport $PORTS ip daddr $LOCAL_IP dnat to $TUNNEL_IP
+        udp dport $PORTS ip daddr $LOCAL_IP dnat to $TUNNEL_IP
+EOF
+    fi
+    
+    cat >> "$NFT_RULES" <<EOF
+    }
+}
+EOF
+    
+    nft -f "$NFT_RULES"
+    rm "$NFT_RULES"
+    echo -e "${GREEN}Port forwarding rules applied successfully!${RESET}"
 }
 
 echo -e "${GREEN}1. Install${RESET}"
@@ -157,7 +160,7 @@ case "$OPTION" in
         fi
 
         echo -e "${GREEN}Installing iodine...${RESET}"
-        apt update && apt install iodine -y
+        apt update && apt install -y iodine nftables socat
 
         echo -e "${GREEN}Building service...${RESET}"
 
@@ -244,7 +247,7 @@ EOF
         fi
         ;;
     6)
-        port_forwarding_setup
+        setup_nftables
         ;;
     7)
         echo "Closing script."
