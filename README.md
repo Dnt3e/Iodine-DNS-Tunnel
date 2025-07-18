@@ -53,7 +53,7 @@
 1. ابتدا فایل اسکریپت را دانلود و اجرایی کنید:
 
 ```bash
-wget https://github.com/IRSupp/DnsTunnel/raw/main/Irsupp-DnsTunnel.sh
+wget https://github.com/Dnt3e/DnsTunnel/raw/main/Irsupp-DnsTunnel.sh
 chmod +x Irsupp-DnsTunnel.sh
 sudo ./Irsupp-DnsTunnel.sh
 ```
