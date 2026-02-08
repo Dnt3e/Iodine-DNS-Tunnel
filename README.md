@@ -1,117 +1,93 @@
-<div dir="rtl">
+# Iodine DNS Tunnel Manager
 
-![IRsupp](https://github.com/IRSupp/DnsTunnel/blob/main/IRSupp.png)
-
-
-
-# IRsupp DNS Tunnel
-
-## پروژه تونل DNS با استفاده از Iodine
-
-&#x20;یک اسکریپت ساده اما حرفه‌ای است که به شما کمک می‌کند تا به‌صورت خودکار سرویس تونل DNS مبتنی بر `iodine` را در نقش سرور یا کلاینت راه‌اندازی، مدیریت و حذف کنید.
-
-این پروژه برای مواقعی طراحی شده است که دسترسی به اینترنت یا شبکه‌های خاص به دلایل محدودیت یا تحریم قطع شده باشد، اما دسترسی به DNS وجود داشته باشد. با استفاده از این تونل، می‌توانید اطلاعات خود را از طریق درخواست‌های DNS منتقل کنید.
-
-<p align="center">
-  <a href="https://youtu.be/QpYZnoYaTRc?si=11YCJNwi8bHGdWda">
-    🎥 مشاهده آموزش ویدیویی  
-  </a>
-</p>
-
+A lightweight Bash tool to **deploy and manage Iodine DNS tunnels** with automatic networking, firewall, and service configuration.
 
 ---
 
-## ویژگی‌های اسکریپت
+## ✨ Features
 
-- راه‌اندازی خودکار سرور یا کلاینت iodine
-- ساخت و مدیریت سرویس systemd برای اجرای پایدار در پس‌زمینه
-- قابلیت نصب، ری‌استارت، آپدیت، و حذف سرویس از طریق منوی رنگی
-- دریافت خودکار اطلاعات سرور (IP، لوکیشن، دیتاسنتر)
-- بهینه‌شده برای استفاده در محیط‌های تحریم‌شده
-- قابل اجرا روی Debian / Ubuntu و سیستم‌های مبتنی بر systemd
-- رابط کاربری ساده و حرفه‌ای با رنگ‌بندی و بنر اختصاصی
-
----
-
-## پیش‌نیازها
-
-- لینوکس (Debian, Ubuntu, VPS)
-- دسترسی root یا sudo
-- یک دامین و ساخت رکورد های زیر
-
-| Type | Name                 | Content                |
-|------|----------------------|------------------------|
-| NS   | dns.yourdomain.com   | hello.yourdomain.com   |
-| A    | hello.yourdomain.com | Your_Forign_IP         |
-
-
+* Automatic dependency installation
+* Server and Client deployment modes
+* Automatic **Kernel IP Forwarding** configuration
+* Smart **iptables NAT & Masquerade** setup
+* Multi-Port forwarding support (TCP & UDP)
+* Automatic systemd service creation & management
+* Port 53 conflict detection and DNS fix
+* Real-time tunnel status monitoring
+* Interactive CLI interface
+* Safe uninstall and cleanup
 
 ---
 
-## نحوه استفاده
-
-1. ابتدا فایل اسکریپت را دانلود و اجرایی کنید:
+## 📦 Installation
 
 ```bash
-wget https://github.com/Dnt3e/DnsTunnel/raw/main/Irsupp-DnsTunnel.sh
-chmod +x Irsupp-DnsTunnel.sh
-sudo ./Irsupp-DnsTunnel.sh
+curl -O https://raw.githubusercontent.com/Dnt3e/Iodine-DNS-Tunnel/main/iodine-manager.sh
+chmod +x iodine-manager.sh
+sudo ./iodine-manager.sh
 ```
+---
 
-2. پس از اجرا، منوی زیر را مشاهده خواهید کرد:
+## ⚙️ Usage & Networking Capabilities
 
-- **1. Install** : نصب سرویس سرور یا کلاینت
-- **2. Restart** : ری‌استارت سرویس
-- **3. Update** : ویرایش سرویس و اعمال تغییرات
-- **4. Edit** : باز کردن فایل سرویس برای ویرایش دستی
-- **5. Uninstall** : حذف کامل سرویس
-- **6. Close** : خروج از اسکریپت
+This script automatically prepares your system for DNS tunneling by:
+
+### 🔹 Kernel Networking
+
+* Enables **IPv4 Forwarding**
+* Allows traffic routing between tunnel and external interface
+* Configures NAT to provide internet access through the tunnel
+
+### 🔹 Firewall & Routing
+
+* Applies MASQUERADE rules for outgoing traffic
+* Supports **Multi-Port Forwarding**
+* Allows forwarding multiple TCP/UDP ports from client to server
 
 ---
 
-## مثال راه‌اندازی سرور
+## 🌐 DNS Record Setup (Server Mode)
 
-در نقش سرور، پس از انتخاب گزینه Install، اسکریپت اطلاعات زیر را از شما می‌گیرد:
+Before running server mode you must configure your domain DNS:
 
-- نام دامنه (NS Address)
-- رمز عبور تونل
-- آدرس آی‌پی داخلی سرور تونل (مثلاً 10.0.0.1)
+### Step 1 — Create A Record
 
-سپس سرور به‌شکل زیر اجرا می‌شود:
+Point a subdomain to your server IP:
 
-```bash
-iodined -t 10.0.0.1/24 -f -c -P your_password dns.yourdomain.com
+```
+tun.yourdomain.com → YOUR_SERVER_IP
 ```
 
 ---
 
-## مثال راه‌اندازی کلاینت
+### Step 2 — Create NS Record
 
-در نقش کلاینت، اسکریپت فقط دامنه و پسورد را از شما دریافت می‌کند و به سرور متصل می‌شود:
+Create a nameserver record pointing to the A record:
 
-```bash
-iodine -f -P your_password dns.yourdomain.com
+```
+t1.yourdomain.com → tun.yourdomain.com
 ```
 
 ---
 
-## نکات مهم
+### Step 3 — Use NS Subdomain in Script
 
-- روی سرور، می‌توانید با استفاده از گزینه `-t` رنج آی‌پی شبکه را تعیین کنید.
-- آی‌پی کلاینت توسط سرور اختصاص داده می‌شود و نباید به‌صورت دستی تغییر کند.
-- پس از اتصال، ارتباط دوطرفه بین سرور و کلاینت برقرار خواهد بود.
+When installing server mode, enter:
 
----
-
-## توسعه‌دهنده
-
-ساخته‌شده توسط تیم **IRsupp**\
-کانال تلگرام: [@irsuppchannel](https://t.me/irsuppchannel)
+```
+t1.yourdomain.com
+```
 
 ---
 
-## لایسنس
+## ⚠️ Requirements
 
-MIT License
+* Root access
+* Linux server (Debian / Ubuntu / CentOS / RHEL)
+* Available UDP Port 53
+* Valid domain name for server mode
 
-</div>
+---
+👨‍💻 Developer
+
+Developed by: Dnt3e
