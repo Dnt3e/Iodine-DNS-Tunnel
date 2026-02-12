@@ -26,6 +26,9 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+IODINED_BIN="/usr/sbin/iodined"
+IODINE_BIN="/usr/sbin/iodine"
+
 acquire_lock() {
     local caller="${1:-menu}"
     [[ "$caller" == "service" ]] && return 0
@@ -126,9 +129,85 @@ get_default_if() {
     ip -4 route show default 2>/dev/null | awk '{print $5; exit}'
 }
 
-iodine_flag_supported() {
-    local bin="$1" flag="$2"
-    "$bin" -h 2>&1 | grep -q -- "$flag"
+detect_iodine_flags() {
+    local bin="$1"
+    local help_text
+    help_text=$("$bin" -h 2>&1)
+
+    HAS_FLAG_f=false; HAS_FLAG_c=false; HAS_FLAG_4=false
+    HAS_FLAG_M=false; HAS_FLAG_m=false; HAS_FLAG_T=false
+    HAS_FLAG_I=false; HAS_FLAG_i=false; HAS_FLAG_O=false
+    HAS_FLAG_r=false; HAS_FLAG_P=false; HAS_FLAG_D=false
+
+    echo "$help_text" | grep -q '\-f ' && HAS_FLAG_f=true
+    echo "$help_text" | grep -q '\-c ' && HAS_FLAG_c=true
+    echo "$help_text" | grep -q '\-P ' && HAS_FLAG_P=true
+    echo "$help_text" | grep -q '\-D ' && HAS_FLAG_D=true
+
+    if echo "$help_text" | grep -q '\-4'; then
+        HAS_FLAG_4=true
+    fi
+
+    if echo "$help_text" | grep -q -- '-M '; then
+        HAS_FLAG_M=true
+    fi
+    if echo "$help_text" | grep -q -- '-m '; then
+        HAS_FLAG_m=true
+    fi
+
+    if echo "$help_text" | grep -q -- '-T '; then
+        HAS_FLAG_T=true
+    fi
+
+    if echo "$help_text" | grep -q -- '-I '; then
+        HAS_FLAG_I=true
+    fi
+    if echo "$help_text" | grep -q -- '-i '; then
+        HAS_FLAG_i=true
+    fi
+
+    if echo "$help_text" | grep -q -- '-O '; then
+        HAS_FLAG_O=true
+    fi
+
+    if echo "$help_text" | grep -q -- '-r'; then
+        HAS_FLAG_r=true
+    fi
+
+    if $HAS_FLAG_M; then
+        MTU_FLAG="-M"
+    elif $HAS_FLAG_m; then
+        MTU_FLAG="-m"
+    else
+        MTU_FLAG=""
+    fi
+
+    if $HAS_FLAG_I; then
+        LAZY_FLAG="-I"
+    elif $HAS_FLAG_i; then
+        LAZY_FLAG="-i"
+    else
+        LAZY_FLAG=""
+    fi
+
+    log INFO "Detected flags for $bin: MTU=$MTU_FLAG LAZY=$LAZY_FLAG T=$HAS_FLAG_T O=$HAS_FLAG_O r=$HAS_FLAG_r 4=$HAS_FLAG_4"
+}
+
+show_detected_flags() {
+    local bin="$1"
+    echo -e "${CYAN}Binary: $bin${NC}" >&2
+    echo -ne "  MTU: " >&2
+    [ -n "$MTU_FLAG" ] && echo -e "${GREEN}$MTU_FLAG${NC}" >&2 || echo -e "${RED}none${NC}" >&2
+    echo -ne "  Lazy: " >&2
+    [ -n "$LAZY_FLAG" ] && echo -e "${GREEN}$LAZY_FLAG${NC}" >&2 || echo -e "${RED}none${NC}" >&2
+    echo -ne "  DNS type (-T): " >&2
+    $HAS_FLAG_T && echo -e "${GREEN}yes${NC}" >&2 || echo -e "${RED}no${NC}" >&2
+    echo -ne "  Codec (-O): " >&2
+    $HAS_FLAG_O && echo -e "${GREEN}yes${NC}" >&2 || echo -e "${RED}no${NC}" >&2
+    echo -ne "  Force DNS (-r): " >&2
+    $HAS_FLAG_r && echo -e "${GREEN}yes${NC}" >&2 || echo -e "${RED}no${NC}" >&2
+    echo -ne "  IPv4 only (-4): " >&2
+    $HAS_FLAG_4 && echo -e "${GREEN}yes${NC}" >&2 || echo -e "${RED}no${NC}" >&2
 }
 
 draw_header() {
@@ -331,42 +410,52 @@ fw_clean() {
 build_service_file() {
     load_config || return 1
     write_env_file || return 1
+
     local svc="iodine-${ROLE}"
     local bin args
 
     if [ "$ROLE" = "server" ]; then
-        bin="/usr/sbin/iodined"
-        args="-f -c"
-        iodine_flag_supported "$bin" "-4" && args="$args -4"
-        [ -n "$MTU_SIZE" ] && args="$args -M $MTU_SIZE"
-        if [ -n "$DNS_TYPE" ]; then
-            iodine_flag_supported "$bin" "-T" && args="$args -T $DNS_TYPE"
+        bin="$IODINED_BIN"
+        detect_iodine_flags "$bin"
+        args="-f"
+        $HAS_FLAG_c && args="$args -c"
+        $HAS_FLAG_4 && args="$args -4"
+        if [ -n "$MTU_SIZE" ] && [ -n "$MTU_FLAG" ]; then
+            args="$args $MTU_FLAG $MTU_SIZE"
         fi
-        if [ -n "$LAZY_INTERVAL" ]; then
-            iodine_flag_supported "$bin" "-I" && args="$args -I $LAZY_INTERVAL"
+        if [ -n "$DNS_TYPE" ] && $HAS_FLAG_T; then
+            args="$args -T $DNS_TYPE"
+        fi
+        if [ -n "$LAZY_INTERVAL" ] && [ -n "$LAZY_FLAG" ]; then
+            args="$args $LAZY_FLAG $LAZY_INTERVAL"
         fi
         args="$args $TUN_SERVER_IP $DOMAIN"
     else
-        bin="/usr/sbin/iodine"
+        bin="$IODINE_BIN"
+        detect_iodine_flags "$bin"
         args="-f"
-        [ -n "$MTU_SIZE" ] && args="$args -M $MTU_SIZE"
-        if [ -n "$MAX_HOSTNAME_LEN" ]; then
-            iodine_flag_supported "$bin" "-m" && args="$args -m $MAX_HOSTNAME_LEN"
+        if [ -n "$MTU_SIZE" ] && [ -n "$MTU_FLAG" ]; then
+            args="$args $MTU_FLAG $MTU_SIZE"
         fi
-        if [ -n "$DNS_TYPE" ]; then
-            iodine_flag_supported "$bin" "-T" && args="$args -T $DNS_TYPE"
+        if [ -n "$MAX_HOSTNAME_LEN" ] && $HAS_FLAG_m; then
+            args="$args -m $MAX_HOSTNAME_LEN"
         fi
-        if [ -n "$DOWN_CODEC" ]; then
-            iodine_flag_supported "$bin" "-O" && args="$args -O $DOWN_CODEC"
+        if [ -n "$DNS_TYPE" ] && $HAS_FLAG_T; then
+            args="$args -T $DNS_TYPE"
         fi
-        if [ -n "$LAZY_INTERVAL" ]; then
-            iodine_flag_supported "$bin" "-I" && args="$args -I $LAZY_INTERVAL"
+        if [ -n "$DOWN_CODEC" ] && $HAS_FLAG_O; then
+            args="$args -O $DOWN_CODEC"
         fi
-        if [ "$FORCE_DNS" = "yes" ]; then
-            iodine_flag_supported "$bin" "-r" && args="$args -r"
+        if [ -n "$LAZY_INTERVAL" ] && [ -n "$LAZY_FLAG" ]; then
+            args="$args $LAZY_FLAG $LAZY_INTERVAL"
+        fi
+        if [ "$FORCE_DNS" = "yes" ] && $HAS_FLAG_r; then
+            args="$args -r"
         fi
         args="$args $DOMAIN"
     fi
+
+    log INFO "ExecStart will be: $bin $args -P \${IODINE_PASS}"
 
     cat > "/etc/systemd/system/${svc}.service" <<UNIT
 [Unit]
@@ -391,6 +480,9 @@ UNIT
 
     systemctl daemon-reload
     log INFO "Service file created: $svc"
+
+    echo -e "${CYAN}Generated service command:${NC}" >&2
+    echo -e "  ${YELLOW}$bin $args -P ****${NC}" >&2
 }
 
 start_tunnel() {
@@ -469,24 +561,8 @@ install_deps() {
     echo -e "${GREEN}✓ Ready${NC}"
 }
 
-detect_supported_flags() {
-    local bin="$1"
-    local flags=""
-    iodine_flag_supported "$bin" "-4" && flags="$flags -4"
-    iodine_flag_supported "$bin" "-T" && flags="$flags -T"
-    iodine_flag_supported "$bin" "-I" && flags="$flags -I"
-    iodine_flag_supported "$bin" "-M" && flags="$flags -M"
-    iodine_flag_supported "$bin" "-m" && flags="$flags -m"
-    iodine_flag_supported "$bin" "-O" && flags="$flags -O"
-    iodine_flag_supported "$bin" "-r" && flags="$flags -r"
-    echo "$flags"
-}
-
 run_setup() {
     install_deps
-
-    local server_bin="/usr/sbin/iodined"
-    local client_bin="/usr/sbin/iodine"
 
     echo -e "\n${BOLD}Role:${NC}"
     echo "  1) Server (exit node)"
@@ -496,11 +572,12 @@ run_setup() {
     case "$role_opt" in
         1)
             ROLE="server"
-            check_port_53 || return 1
+            detect_iodine_flags "$IODINED_BIN"
+            echo -e "\n${BOLD}Detected iodined capabilities:${NC}"
+            show_detected_flags "$IODINED_BIN"
+            echo
 
-            local srv_flags
-            srv_flags=$(detect_supported_flags "$server_bin")
-            echo -e "${CYAN}Supported flags:${NC} $srv_flags" >&2
+            check_port_53 || return 1
 
             echo -e "\n${YELLOW}DNS setup needed:${NC}"
             echo "  A  → tun.example.com  → your server IP"
@@ -516,29 +593,33 @@ run_setup() {
 
             echo -e "\n${BOLD}Options (Enter = auto/default):${NC}"
 
-            read -rp "Auto-detect MTU? [Y/n]: " m
-            m=${m:-y}
-            if [[ "$m" =~ ^[Yy]$ ]]; then
-                MTU_SIZE=$(mtu_detect "8.8.8.8")
+            if [ -n "$MTU_FLAG" ]; then
+                read -rp "Auto-detect MTU? [Y/n]: " m
+                m=${m:-y}
+                if [[ "$m" =~ ^[Yy]$ ]]; then
+                    MTU_SIZE=$(mtu_detect "8.8.8.8")
+                else
+                    read -rp "MTU [1280]: " MTU_SIZE
+                    MTU_SIZE=${MTU_SIZE:-1280}
+                fi
             else
-                read -rp "MTU [1280]: " MTU_SIZE
-                MTU_SIZE=${MTU_SIZE:-1280}
+                MTU_SIZE=""
+                echo -e "${YELLOW}MTU flag not supported by this iodined version${NC}"
             fi
 
-            if iodine_flag_supported "$server_bin" "-T"; then
+            if $HAS_FLAG_T; then
                 read -rp "DNS type (Enter=auto): " DNS_TYPE
                 [ -z "$DNS_TYPE" ] && DNS_TYPE=$(detect_dns_type "$DOMAIN")
             else
                 DNS_TYPE=""
-                echo -e "${YELLOW}DNS type flag (-T) not supported, skipping${NC}"
             fi
 
-            if iodine_flag_supported "$server_bin" "-I"; then
-                read -rp "Lazy interval [4]: " LAZY_INTERVAL
-                LAZY_INTERVAL=${LAZY_INTERVAL:-4}
+            if [ -n "$LAZY_FLAG" ]; then
+                read -rp "Idle timeout seconds [0=disable]: " LAZY_INTERVAL
+                LAZY_INTERVAL=${LAZY_INTERVAL:-0}
+                [ "$LAZY_INTERVAL" = "0" ] && LAZY_INTERVAL=""
             else
                 LAZY_INTERVAL=""
-                echo -e "${YELLOW}Lazy interval (-I) not supported, skipping${NC}"
             fi
 
             PORT_LIST=""
@@ -548,10 +629,10 @@ run_setup() {
             ;;
         2)
             ROLE="client"
-
-            local cli_flags
-            cli_flags=$(detect_supported_flags "$client_bin")
-            echo -e "${CYAN}Supported flags:${NC} $cli_flags" >&2
+            detect_iodine_flags "$IODINE_BIN"
+            echo -e "\n${BOLD}Detected iodine capabilities:${NC}"
+            show_detected_flags "$IODINE_BIN"
+            echo
 
             while true; do
                 read -rp "Server NS subdomain: " DOMAIN
@@ -569,52 +650,46 @@ run_setup() {
 
             echo -e "\n${BOLD}Options (Enter = auto/default):${NC}"
 
-            read -rp "Auto-detect MTU after connect? [Y/n]: " m
-            m=${m:-y}
-            if [[ "$m" =~ ^[Yy]$ ]]; then
+            if [ -n "$MTU_FLAG" ]; then
+                read -rp "Auto-detect MTU after connect? [Y/n]: " m
+                m=${m:-y}
+                if [[ "$m" =~ ^[Yy]$ ]]; then
+                    MTU_SIZE=""
+                else
+                    read -rp "MTU [1280]: " MTU_SIZE
+                    MTU_SIZE=${MTU_SIZE:-1280}
+                fi
+            else
                 MTU_SIZE=""
-            else
-                read -rp "MTU [1280]: " MTU_SIZE
-                MTU_SIZE=${MTU_SIZE:-1280}
             fi
 
-            if iodine_flag_supported "$client_bin" "-m"; then
-                read -rp "Max hostname len [255]: " MAX_HOSTNAME_LEN
-                MAX_HOSTNAME_LEN=${MAX_HOSTNAME_LEN:-255}
-            else
-                MAX_HOSTNAME_LEN=""
-                echo -e "${YELLOW}Max hostname (-m) not supported, skipping${NC}"
-            fi
-
-            if iodine_flag_supported "$client_bin" "-T"; then
+            MAX_HOSTNAME_LEN=""
+            if $HAS_FLAG_T; then
                 read -rp "DNS type (Enter=auto): " DNS_TYPE
                 [ -z "$DNS_TYPE" ] && DNS_TYPE=$(detect_dns_type "$DOMAIN")
             else
                 DNS_TYPE=""
-                echo -e "${YELLOW}DNS type flag (-T) not supported, skipping${NC}"
             fi
 
-            if iodine_flag_supported "$client_bin" "-O"; then
+            if $HAS_FLAG_O; then
                 read -rp "Downstream codec (Enter=auto): " DOWN_CODEC
             else
                 DOWN_CODEC=""
-                echo -e "${YELLOW}Codec (-O) not supported, skipping${NC}"
             fi
 
-            if iodine_flag_supported "$client_bin" "-I"; then
-                read -rp "Lazy interval [4]: " LAZY_INTERVAL
-                LAZY_INTERVAL=${LAZY_INTERVAL:-4}
+            if [ -n "$LAZY_FLAG" ]; then
+                read -rp "Idle timeout seconds [0=disable]: " LAZY_INTERVAL
+                LAZY_INTERVAL=${LAZY_INTERVAL:-0}
+                [ "$LAZY_INTERVAL" = "0" ] && LAZY_INTERVAL=""
             else
                 LAZY_INTERVAL=""
-                echo -e "${YELLOW}Lazy interval (-I) not supported, skipping${NC}"
             fi
 
-            if iodine_flag_supported "$client_bin" "-r"; then
+            if $HAS_FLAG_r; then
                 read -rp "Force DNS mode? [y/N]: " fd
                 [[ "$fd" =~ ^[Yy]$ ]] && FORCE_DNS="yes" || FORCE_DNS="no"
             else
                 FORCE_DNS="no"
-                echo -e "${YELLOW}Force DNS (-r) not supported, skipping${NC}"
             fi
             ;;
         *)
@@ -635,7 +710,7 @@ run_setup() {
         return 1
     fi
 
-    if [ "$ROLE" = "client" ] && [ -z "$MTU_SIZE" ]; then
+    if [ "$ROLE" = "client" ] && [ -z "$MTU_SIZE" ] && [ -n "$MTU_FLAG" ]; then
         echo -e "\n${YELLOW}Post-connect MTU detection...${NC}"
         local tries=0 dmtu=""
         while [ $tries -lt 3 ]; do
@@ -657,7 +732,7 @@ run_setup() {
     echo -e "\n${CYAN}═══ Summary ═══${NC}"
     echo -e "  Role:   ${YELLOW}$ROLE${NC}"
     echo -e "  Domain: ${YELLOW}$DOMAIN${NC}"
-    echo -e "  MTU:    ${YELLOW}${MTU_SIZE:-auto}${NC}"
+    echo -e "  MTU:    ${YELLOW}${MTU_SIZE:-default}${NC}"
     [ -n "$DNS_TYPE" ] && echo -e "  DNS:    ${YELLOW}$DNS_TYPE${NC}"
     [ -n "$PORT_LIST" ] && echo -e "  Ports:  ${YELLOW}$PORT_LIST${NC}"
     echo
@@ -787,88 +862,85 @@ edit_config() {
     fi
 
     local bin
-    [ "$ROLE" = "server" ] && bin="/usr/sbin/iodined" || bin="/usr/sbin/iodine"
+    [ "$ROLE" = "server" ] && bin="$IODINED_BIN" || bin="$IODINE_BIN"
+    detect_iodine_flags "$bin"
 
     echo -e "${BOLD}Edit Configuration${NC}\n"
-    echo "  1) MTU:            ${YELLOW}${MTU_SIZE:-auto}${NC}"
+    local opts=()
+    local labels=()
 
-    local opt_num=2
-    local has_dns_type=false has_lazy=false has_codec=false
-    local has_hostname=false has_force=false
+    if [ -n "$MTU_FLAG" ]; then
+        opts+=("mtu")
+        labels+=("MTU:            ${YELLOW}${MTU_SIZE:-default}${NC}")
+    fi
+    if $HAS_FLAG_T; then
+        opts+=("dns_type")
+        labels+=("DNS Type:       ${YELLOW}${DNS_TYPE:-auto}${NC}")
+    fi
+    if [ -n "$LAZY_FLAG" ]; then
+        opts+=("lazy")
+        labels+=("Idle Timeout:   ${YELLOW}${LAZY_INTERVAL:-none}${NC}")
+    fi
+    if [ "$ROLE" = "client" ] && $HAS_FLAG_O; then
+        opts+=("codec")
+        labels+=("Codec:          ${YELLOW}${DOWN_CODEC:-auto}${NC}")
+    fi
+    if [ "$ROLE" = "client" ] && $HAS_FLAG_r; then
+        opts+=("force_dns")
+        labels+=("Force DNS:      ${YELLOW}${FORCE_DNS:-no}${NC}")
+    fi
+    opts+=("password")
+    labels+=("Password")
 
-    if iodine_flag_supported "$bin" "-T"; then
-        echo "  $opt_num) DNS Type:       ${YELLOW}${DNS_TYPE:-auto}${NC}"
-        has_dns_type=true; ((opt_num++))
-    fi
-    if iodine_flag_supported "$bin" "-I"; then
-        echo "  $opt_num) Lazy Interval:  ${YELLOW}${LAZY_INTERVAL:-none}${NC}"
-        has_lazy=true; ((opt_num++))
-    fi
-    if [ "$ROLE" = "client" ]; then
-        if iodine_flag_supported "$bin" "-O"; then
-            echo "  $opt_num) Codec:          ${YELLOW}${DOWN_CODEC:-auto}${NC}"
-            has_codec=true; ((opt_num++))
-        fi
-        if iodine_flag_supported "$bin" "-m"; then
-            echo "  $opt_num) Max Hostname:   ${YELLOW}${MAX_HOSTNAME_LEN:-255}${NC}"
-            has_hostname=true; ((opt_num++))
-        fi
-        if iodine_flag_supported "$bin" "-r"; then
-            echo "  $opt_num) Force DNS:      ${YELLOW}${FORCE_DNS:-no}${NC}"
-            has_force=true; ((opt_num++))
-        fi
-    fi
-    echo "  $opt_num) Password"
-    local pw_num=$opt_num
+    local i=1
+    for label in "${labels[@]}"; do
+        echo "  $i) $label"
+        ((i++))
+    done
     echo "  0) Back"
     echo
     read -rp "Select: " e
 
-    if [ "$e" = "0" ]; then return; fi
+    [ "$e" = "0" ] && return
+    if ! [[ "$e" =~ ^[0-9]+$ ]] || [ "$e" -lt 1 ] || [ "$e" -gt ${#opts[@]} ]; then
+        return
+    fi
 
-    if [ "$e" = "1" ]; then
-        read -rp "Auto-detect? [Y/n]: " a
-        a=${a:-y}
-        if [[ "$a" =~ ^[Yy]$ ]]; then
-            MTU_SIZE=$(mtu_detect "$TUN_SERVER_IP")
-            [[ "$MTU_SIZE" =~ ^[0-9]+$ ]] || {
-                echo -e "${RED}Detection failed${NC}"
-                read -rp "Press Enter..."; return
-            }
-        else
-            read -rp "MTU: " MTU_SIZE
-        fi
-    elif [ "$e" = "$pw_num" ]; then
-        read_password
-    else
-        local idx=2
-        if $has_dns_type && [ "$e" = "$idx" ]; then
+    local selected="${opts[$((e-1))]}"
+
+    case "$selected" in
+        mtu)
+            read -rp "Auto-detect? [Y/n]: " a
+            a=${a:-y}
+            if [[ "$a" =~ ^[Yy]$ ]]; then
+                MTU_SIZE=$(mtu_detect "$TUN_SERVER_IP")
+                [[ "$MTU_SIZE" =~ ^[0-9]+$ ]] || {
+                    echo -e "${RED}Detection failed${NC}"
+                    read -rp "Press Enter..."; return
+                }
+            else
+                read -rp "MTU: " MTU_SIZE
+            fi
+            ;;
+        dns_type)
             read -rp "DNS type (Enter=auto-detect): " DNS_TYPE
             [ -z "$DNS_TYPE" ] && DNS_TYPE=$(detect_dns_type "$DOMAIN")
-        fi
-        $has_dns_type && ((idx++))
-
-        if $has_lazy && [ "$e" = "$idx" ]; then
-            read -rp "Lazy interval: " LAZY_INTERVAL
-        fi
-        $has_lazy && ((idx++))
-
-        if $has_codec && [ "$e" = "$idx" ]; then
+            ;;
+        lazy)
+            read -rp "Idle timeout seconds [0=disable]: " LAZY_INTERVAL
+            [ "$LAZY_INTERVAL" = "0" ] && LAZY_INTERVAL=""
+            ;;
+        codec)
             read -rp "Codec (raw/base128/base64, Enter=auto): " DOWN_CODEC
-        fi
-        $has_codec && ((idx++))
-
-        if $has_hostname && [ "$e" = "$idx" ]; then
-            read -rp "Max hostname length [255]: " MAX_HOSTNAME_LEN
-            MAX_HOSTNAME_LEN=${MAX_HOSTNAME_LEN:-255}
-        fi
-        $has_hostname && ((idx++))
-
-        if $has_force && [ "$e" = "$idx" ]; then
+            ;;
+        force_dns)
             read -rp "Force DNS? [y/N]: " fd
             [[ "$fd" =~ ^[Yy]$ ]] && FORCE_DNS="yes" || FORCE_DNS="no"
-        fi
-    fi
+            ;;
+        password)
+            read_password
+            ;;
+    esac
 
     save_config
     echo -e "${GREEN}Saved${NC}"
