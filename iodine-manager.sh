@@ -28,9 +28,7 @@ NC='\033[0m'
 
 acquire_lock() {
     local caller="${1:-menu}"
-    if [[ "$caller" == "service" ]]; then
-        return 0
-    fi
+    [[ "$caller" == "service" ]] && return 0
     exec 200>"$LOCK_FILE"
     if ! flock -n 200; then
         echo "Another instance is running."
@@ -39,11 +37,8 @@ acquire_lock() {
 }
 
 case "${1:-}" in
-    --apply-fw|--clean-fw)
-        ;;
-    *)
-        acquire_lock "menu"
-        ;;
+    --apply-fw|--clean-fw) ;;
+    *) acquire_lock "menu" ;;
 esac
 
 cleanup_on_exit() {
@@ -129,6 +124,11 @@ get_svc_name() {
 
 get_default_if() {
     ip -4 route show default 2>/dev/null | awk '{print $5; exit}'
+}
+
+iodine_flag_supported() {
+    local bin="$1" flag="$2"
+    "$bin" -h 2>&1 | grep -q -- "$flag"
 }
 
 draw_header() {
@@ -337,19 +337,34 @@ build_service_file() {
     if [ "$ROLE" = "server" ]; then
         bin="/usr/sbin/iodined"
         args="-f -c"
+        iodine_flag_supported "$bin" "-4" && args="$args -4"
         [ -n "$MTU_SIZE" ] && args="$args -M $MTU_SIZE"
-        [ -n "$DNS_TYPE" ] && args="$args -T $DNS_TYPE"
-        [ -n "$LAZY_INTERVAL" ] && args="$args -I $LAZY_INTERVAL"
+        if [ -n "$DNS_TYPE" ]; then
+            iodine_flag_supported "$bin" "-T" && args="$args -T $DNS_TYPE"
+        fi
+        if [ -n "$LAZY_INTERVAL" ]; then
+            iodine_flag_supported "$bin" "-I" && args="$args -I $LAZY_INTERVAL"
+        fi
         args="$args $TUN_SERVER_IP $DOMAIN"
     else
         bin="/usr/sbin/iodine"
         args="-f"
         [ -n "$MTU_SIZE" ] && args="$args -M $MTU_SIZE"
-        [ -n "$MAX_HOSTNAME_LEN" ] && args="$args -m $MAX_HOSTNAME_LEN"
-        [ -n "$DNS_TYPE" ] && args="$args -T $DNS_TYPE"
-        [ -n "$DOWN_CODEC" ] && args="$args -O $DOWN_CODEC"
-        [ -n "$LAZY_INTERVAL" ] && args="$args -I $LAZY_INTERVAL"
-        [ "$FORCE_DNS" = "yes" ] && args="$args -r"
+        if [ -n "$MAX_HOSTNAME_LEN" ]; then
+            iodine_flag_supported "$bin" "-m" && args="$args -m $MAX_HOSTNAME_LEN"
+        fi
+        if [ -n "$DNS_TYPE" ]; then
+            iodine_flag_supported "$bin" "-T" && args="$args -T $DNS_TYPE"
+        fi
+        if [ -n "$DOWN_CODEC" ]; then
+            iodine_flag_supported "$bin" "-O" && args="$args -O $DOWN_CODEC"
+        fi
+        if [ -n "$LAZY_INTERVAL" ]; then
+            iodine_flag_supported "$bin" "-I" && args="$args -I $LAZY_INTERVAL"
+        fi
+        if [ "$FORCE_DNS" = "yes" ]; then
+            iodine_flag_supported "$bin" "-r" && args="$args -r"
+        fi
         args="$args $DOMAIN"
     fi
 
@@ -454,8 +469,25 @@ install_deps() {
     echo -e "${GREEN}✓ Ready${NC}"
 }
 
+detect_supported_flags() {
+    local bin="$1"
+    local flags=""
+    iodine_flag_supported "$bin" "-4" && flags="$flags -4"
+    iodine_flag_supported "$bin" "-T" && flags="$flags -T"
+    iodine_flag_supported "$bin" "-I" && flags="$flags -I"
+    iodine_flag_supported "$bin" "-M" && flags="$flags -M"
+    iodine_flag_supported "$bin" "-m" && flags="$flags -m"
+    iodine_flag_supported "$bin" "-O" && flags="$flags -O"
+    iodine_flag_supported "$bin" "-r" && flags="$flags -r"
+    echo "$flags"
+}
+
 run_setup() {
     install_deps
+
+    local server_bin="/usr/sbin/iodined"
+    local client_bin="/usr/sbin/iodine"
+
     echo -e "\n${BOLD}Role:${NC}"
     echo "  1) Server (exit node)"
     echo "  2) Client (entry point)"
@@ -465,6 +497,11 @@ run_setup() {
         1)
             ROLE="server"
             check_port_53 || return 1
+
+            local srv_flags
+            srv_flags=$(detect_supported_flags "$server_bin")
+            echo -e "${CYAN}Supported flags:${NC} $srv_flags" >&2
+
             echo -e "\n${YELLOW}DNS setup needed:${NC}"
             echo "  A  → tun.example.com  → your server IP"
             echo "  NS → t1.example.com   → tun.example.com"
@@ -488,11 +525,21 @@ run_setup() {
                 MTU_SIZE=${MTU_SIZE:-1280}
             fi
 
-            read -rp "DNS type (Enter=auto): " DNS_TYPE
-            [ -z "$DNS_TYPE" ] && DNS_TYPE=$(detect_dns_type "$DOMAIN")
+            if iodine_flag_supported "$server_bin" "-T"; then
+                read -rp "DNS type (Enter=auto): " DNS_TYPE
+                [ -z "$DNS_TYPE" ] && DNS_TYPE=$(detect_dns_type "$DOMAIN")
+            else
+                DNS_TYPE=""
+                echo -e "${YELLOW}DNS type flag (-T) not supported, skipping${NC}"
+            fi
 
-            read -rp "Lazy interval [4]: " LAZY_INTERVAL
-            LAZY_INTERVAL=${LAZY_INTERVAL:-4}
+            if iodine_flag_supported "$server_bin" "-I"; then
+                read -rp "Lazy interval [4]: " LAZY_INTERVAL
+                LAZY_INTERVAL=${LAZY_INTERVAL:-4}
+            else
+                LAZY_INTERVAL=""
+                echo -e "${YELLOW}Lazy interval (-I) not supported, skipping${NC}"
+            fi
 
             PORT_LIST=""
             FORCE_DNS="no"
@@ -501,6 +548,11 @@ run_setup() {
             ;;
         2)
             ROLE="client"
+
+            local cli_flags
+            cli_flags=$(detect_supported_flags "$client_bin")
+            echo -e "${CYAN}Supported flags:${NC} $cli_flags" >&2
+
             while true; do
                 read -rp "Server NS subdomain: " DOMAIN
                 validate_domain "$DOMAIN" && break
@@ -526,19 +578,44 @@ run_setup() {
                 MTU_SIZE=${MTU_SIZE:-1280}
             fi
 
-            read -rp "Max hostname len [255]: " MAX_HOSTNAME_LEN
-            MAX_HOSTNAME_LEN=${MAX_HOSTNAME_LEN:-255}
+            if iodine_flag_supported "$client_bin" "-m"; then
+                read -rp "Max hostname len [255]: " MAX_HOSTNAME_LEN
+                MAX_HOSTNAME_LEN=${MAX_HOSTNAME_LEN:-255}
+            else
+                MAX_HOSTNAME_LEN=""
+                echo -e "${YELLOW}Max hostname (-m) not supported, skipping${NC}"
+            fi
 
-            read -rp "DNS type (Enter=auto): " DNS_TYPE
-            [ -z "$DNS_TYPE" ] && DNS_TYPE=$(detect_dns_type "$DOMAIN")
+            if iodine_flag_supported "$client_bin" "-T"; then
+                read -rp "DNS type (Enter=auto): " DNS_TYPE
+                [ -z "$DNS_TYPE" ] && DNS_TYPE=$(detect_dns_type "$DOMAIN")
+            else
+                DNS_TYPE=""
+                echo -e "${YELLOW}DNS type flag (-T) not supported, skipping${NC}"
+            fi
 
-            read -rp "Downstream codec (Enter=auto): " DOWN_CODEC
+            if iodine_flag_supported "$client_bin" "-O"; then
+                read -rp "Downstream codec (Enter=auto): " DOWN_CODEC
+            else
+                DOWN_CODEC=""
+                echo -e "${YELLOW}Codec (-O) not supported, skipping${NC}"
+            fi
 
-            read -rp "Lazy interval [4]: " LAZY_INTERVAL
-            LAZY_INTERVAL=${LAZY_INTERVAL:-4}
+            if iodine_flag_supported "$client_bin" "-I"; then
+                read -rp "Lazy interval [4]: " LAZY_INTERVAL
+                LAZY_INTERVAL=${LAZY_INTERVAL:-4}
+            else
+                LAZY_INTERVAL=""
+                echo -e "${YELLOW}Lazy interval (-I) not supported, skipping${NC}"
+            fi
 
-            read -rp "Force DNS mode? [y/N]: " fd
-            [[ "$fd" =~ ^[Yy]$ ]] && FORCE_DNS="yes" || FORCE_DNS="no"
+            if iodine_flag_supported "$client_bin" "-r"; then
+                read -rp "Force DNS mode? [y/N]: " fd
+                [[ "$fd" =~ ^[Yy]$ ]] && FORCE_DNS="yes" || FORCE_DNS="no"
+            else
+                FORCE_DNS="no"
+                echo -e "${YELLOW}Force DNS (-r) not supported, skipping${NC}"
+            fi
             ;;
         *)
             echo "Invalid"
@@ -581,7 +658,7 @@ run_setup() {
     echo -e "  Role:   ${YELLOW}$ROLE${NC}"
     echo -e "  Domain: ${YELLOW}$DOMAIN${NC}"
     echo -e "  MTU:    ${YELLOW}${MTU_SIZE:-auto}${NC}"
-    echo -e "  DNS:    ${YELLOW}${DNS_TYPE:-auto}${NC}"
+    [ -n "$DNS_TYPE" ] && echo -e "  DNS:    ${YELLOW}$DNS_TYPE${NC}"
     [ -n "$PORT_LIST" ] && echo -e "  Ports:  ${YELLOW}$PORT_LIST${NC}"
     echo
     read -rp "Press Enter..."
@@ -617,10 +694,9 @@ status_menu() {
                 echo
                 if systemctl is-active --quiet "$svc" 2>/dev/null; then
                     echo -e "  ${GREEN}● $svc is running${NC}"
-                    local pid
+                    local pid uptime
                     pid=$(systemctl show -p MainPID --value "$svc" 2>/dev/null)
                     [ "$pid" != "0" ] && [ -n "$pid" ] && echo "  PID: $pid"
-                    local uptime
                     uptime=$(systemctl show -p ActiveEnterTimestamp --value "$svc" 2>/dev/null)
                     [ -n "$uptime" ] && echo "  Since: $uptime"
                 else
@@ -664,7 +740,7 @@ status_menu() {
                 ;;
             4)
                 echo
-                journalctl -u "$svc" --no-pager -n 20 2>/dev/null || echo "  No logs available"
+                journalctl -u "$svc" --no-pager -n 20 2>/dev/null || echo "  No logs"
                 echo
                 read -rp "Press Enter..."
                 ;;
@@ -709,62 +785,91 @@ edit_config() {
         read -rp "Press Enter..."
         return
     fi
+
+    local bin
+    [ "$ROLE" = "server" ] && bin="/usr/sbin/iodined" || bin="/usr/sbin/iodine"
+
     echo -e "${BOLD}Edit Configuration${NC}\n"
-    echo "  1) DNS Type:       ${YELLOW}${DNS_TYPE:-auto}${NC}"
-    echo "  2) MTU:            ${YELLOW}${MTU_SIZE:-auto}${NC}"
-    echo "  3) Lazy Interval:  ${YELLOW}${LAZY_INTERVAL:-4}${NC}"
-    if [ "$ROLE" = "client" ]; then
-        echo "  4) Codec:          ${YELLOW}${DOWN_CODEC:-auto}${NC}"
-        echo "  5) Max Hostname:   ${YELLOW}${MAX_HOSTNAME_LEN:-255}${NC}"
-        echo "  6) Force DNS:      ${YELLOW}${FORCE_DNS:-no}${NC}"
+    echo "  1) MTU:            ${YELLOW}${MTU_SIZE:-auto}${NC}"
+
+    local opt_num=2
+    local has_dns_type=false has_lazy=false has_codec=false
+    local has_hostname=false has_force=false
+
+    if iodine_flag_supported "$bin" "-T"; then
+        echo "  $opt_num) DNS Type:       ${YELLOW}${DNS_TYPE:-auto}${NC}"
+        has_dns_type=true; ((opt_num++))
     fi
-    echo "  7) Password"
+    if iodine_flag_supported "$bin" "-I"; then
+        echo "  $opt_num) Lazy Interval:  ${YELLOW}${LAZY_INTERVAL:-none}${NC}"
+        has_lazy=true; ((opt_num++))
+    fi
+    if [ "$ROLE" = "client" ]; then
+        if iodine_flag_supported "$bin" "-O"; then
+            echo "  $opt_num) Codec:          ${YELLOW}${DOWN_CODEC:-auto}${NC}"
+            has_codec=true; ((opt_num++))
+        fi
+        if iodine_flag_supported "$bin" "-m"; then
+            echo "  $opt_num) Max Hostname:   ${YELLOW}${MAX_HOSTNAME_LEN:-255}${NC}"
+            has_hostname=true; ((opt_num++))
+        fi
+        if iodine_flag_supported "$bin" "-r"; then
+            echo "  $opt_num) Force DNS:      ${YELLOW}${FORCE_DNS:-no}${NC}"
+            has_force=true; ((opt_num++))
+        fi
+    fi
+    echo "  $opt_num) Password"
+    local pw_num=$opt_num
     echo "  0) Back"
     echo
     read -rp "Select: " e
-    case "$e" in
-        1)
+
+    if [ "$e" = "0" ]; then return; fi
+
+    if [ "$e" = "1" ]; then
+        read -rp "Auto-detect? [Y/n]: " a
+        a=${a:-y}
+        if [[ "$a" =~ ^[Yy]$ ]]; then
+            MTU_SIZE=$(mtu_detect "$TUN_SERVER_IP")
+            [[ "$MTU_SIZE" =~ ^[0-9]+$ ]] || {
+                echo -e "${RED}Detection failed${NC}"
+                read -rp "Press Enter..."; return
+            }
+        else
+            read -rp "MTU: " MTU_SIZE
+        fi
+    elif [ "$e" = "$pw_num" ]; then
+        read_password
+    else
+        local idx=2
+        if $has_dns_type && [ "$e" = "$idx" ]; then
             read -rp "DNS type (Enter=auto-detect): " DNS_TYPE
             [ -z "$DNS_TYPE" ] && DNS_TYPE=$(detect_dns_type "$DOMAIN")
-            ;;
-        2)
-            read -rp "Auto-detect? [Y/n]: " a
-            a=${a:-y}
-            if [[ "$a" =~ ^[Yy]$ ]]; then
-                MTU_SIZE=$(mtu_detect "$TUN_SERVER_IP")
-                [[ "$MTU_SIZE" =~ ^[0-9]+$ ]] || {
-                    echo -e "${RED}Detection failed${NC}"
-                    read -rp "Press Enter..."
-                    return
-                }
-            else
-                read -rp "MTU: " MTU_SIZE
-            fi
-            ;;
-        3)
-            read -rp "Lazy interval [4]: " LAZY_INTERVAL
-            LAZY_INTERVAL=${LAZY_INTERVAL:-4}
-            ;;
-        4)
-            [ "$ROLE" != "client" ] && return
+        fi
+        $has_dns_type && ((idx++))
+
+        if $has_lazy && [ "$e" = "$idx" ]; then
+            read -rp "Lazy interval: " LAZY_INTERVAL
+        fi
+        $has_lazy && ((idx++))
+
+        if $has_codec && [ "$e" = "$idx" ]; then
             read -rp "Codec (raw/base128/base64, Enter=auto): " DOWN_CODEC
-            ;;
-        5)
-            [ "$ROLE" != "client" ] && return
+        fi
+        $has_codec && ((idx++))
+
+        if $has_hostname && [ "$e" = "$idx" ]; then
             read -rp "Max hostname length [255]: " MAX_HOSTNAME_LEN
             MAX_HOSTNAME_LEN=${MAX_HOSTNAME_LEN:-255}
-            ;;
-        6)
-            [ "$ROLE" != "client" ] && return
+        fi
+        $has_hostname && ((idx++))
+
+        if $has_force && [ "$e" = "$idx" ]; then
             read -rp "Force DNS? [y/N]: " fd
             [[ "$fd" =~ ^[Yy]$ ]] && FORCE_DNS="yes" || FORCE_DNS="no"
-            ;;
-        7)
-            read_password
-            ;;
-        0) return ;;
-        *) return ;;
-    esac
+        fi
+    fi
+
     save_config
     echo -e "${GREEN}Saved${NC}"
     read -rp "Restart service now? [Y/n]: " r
